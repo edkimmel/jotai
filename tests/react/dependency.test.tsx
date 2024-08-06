@@ -1052,7 +1052,7 @@ it('all dependencies should receive updated value', async () => {
 
   const barsFavoriteNumberAtom = atom((get) => {
     if (get(baseAtom).name === 'Bar') {
-      return get(favoriteNumberAtom) // Optionally depend on a derived atom of birthdayAtom, which is derived from baseAtom
+      return get(favoriteNumberAtom) // Optionally depend on a derived atom of baseAtom
     }
     return undefined
   })
