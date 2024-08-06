@@ -1044,19 +1044,32 @@ it('works with async dependencies (#2565)', async () => {
 
 it('all dependencies should receive updated value', async () => {
   const baseAtom = atom({ name: 'Foo', favoriteNumber: 10 })
+  baseAtom.debugLabel = 'baseAtom'
   const favoriteNumberAtom = selectAtom(baseAtom, (val) => val.favoriteNumber)
+
   const favoriteNumberIsEven = selectAtom(
     favoriteNumberAtom,
     (val) => val % 2 === 0,
   )
 
   const barsFavoriteNumberAtom = atom((get) => {
+    // adding this fixes it, because the optional dependency becomes required.
+    // get(favoriteNumberAtom)
     if (get(baseAtom).name === 'Bar') {
       return get(favoriteNumberAtom) // Optionally depend on a derived atom of baseAtom
     }
     return undefined
   })
 
+  /* The above atom structure results in the following topographical sort when processing dependencies
+   * - baseAtom
+   * - barsFavoriteNumberAtom
+   * - favoriteNumberAtom
+   * - favoriteNumberIsEven
+   *
+   * The issue is barsFavoriteNumberAtom now depends on favoriteNumberAtom and should have been sorted below it.
+   * The code as-is couldn't know that the dependencies array was going to change.
+   */
   const Main = () => {
     const [base, setBase] = useAtom(baseAtom)
     const favoriteNumber = useAtomValue(favoriteNumberAtom)
@@ -1077,10 +1090,9 @@ it('all dependencies should receive updated value', async () => {
 
     return (
       <>
-        {numberUpToDate ? 'Number Sync' : 'Number Desync'}
-        {evenUpToDate ? 'Even Sync' : 'Even Desync'}
-        {evenIsCorrect ? 'Even Correct' : 'Even Incorrect'}
-
+        <span>{numberUpToDate ? 'Number Sync' : 'Number Desync'}</span>
+        <span>{evenUpToDate ? 'Even Sync' : 'Even Desync'}</span>
+        <span> {evenIsCorrect ? 'Even Correct' : 'Even Incorrect'}</span>
         <button
           onClick={() =>
             setBase({
