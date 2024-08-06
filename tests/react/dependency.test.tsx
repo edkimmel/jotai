@@ -3,6 +3,7 @@ import { render, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai/react'
+import { selectAtom } from 'jotai/utils'
 import { atom } from 'jotai/vanilla'
 import type { Atom, Getter } from 'jotai/vanilla'
 
@@ -1039,4 +1040,73 @@ it('works with async dependencies (#2565)', async () => {
 
   await userEvent.click(getByText('Count Up'))
   await findByText('count: 102')
+})
+
+it('all dependencies should receive updated value', async () => {
+  const baseAtom = atom({ name: 'Foo', favoriteNumber: 10 })
+  const favoriteNumberAtom = selectAtom(baseAtom, (val) => val.favoriteNumber)
+  const favoriteNumberIsEven = selectAtom(
+    favoriteNumberAtom,
+    (val) => val % 2 === 0,
+  )
+
+  const barsFavoriteNumberAtom = atom((get) => {
+    if (get(baseAtom).name === 'Bar') {
+      return get(favoriteNumberAtom) // Optionally depend on a derived atom of birthdayAtom, which is derived from baseAtom
+    }
+    return undefined
+  })
+
+  const Main = () => {
+    const [base, setBase] = useAtom(baseAtom)
+    const favoriteNumber = useAtomValue(favoriteNumberAtom)
+    const isEven = useAtomValue(favoriteNumberIsEven)
+    const barsFavoriteNumber = useAtomValue(barsFavoriteNumberAtom)
+
+    console.debug(`
+      name: ${base.name}
+      base: ${base.favoriteNumber},
+      favoriteNumber: ${favoriteNumber},
+      isEven: ${isEven}
+      barsFavoriteNumber: ${barsFavoriteNumber}
+    `)
+
+    const numberUpToDate = base.favoriteNumber === favoriteNumber
+    const evenUpToDate = base.favoriteNumber === barsFavoriteNumber
+    const evenIsCorrect = isEven === (base.favoriteNumber % 2 === 0)
+
+    return (
+      <>
+        {numberUpToDate ? 'Number Sync' : 'Number Desync'}
+        {evenUpToDate ? 'Even Sync' : 'Even Desync'}
+        {evenIsCorrect ? 'Even Correct' : 'Even Incorrect'}
+
+        <button
+          onClick={() =>
+            setBase({
+              name: 'Bar',
+              favoriteNumber: 15,
+            })
+          }
+        >
+          clickMe
+        </button>
+      </>
+    )
+  }
+
+  const { getByText, findByText, queryByText } = render(
+    <StrictMode>
+      <Main />
+    </StrictMode>,
+  )
+
+  await userEvent.click(getByText('clickMe'))
+  await findByText('Number Sync')
+  await findByText('Even Sync')
+  await findByText('Even Correct')
+
+  expect(queryByText('Number Desync')).toBeNull()
+  expect(queryByText('Even Desync')).toBeNull()
+  expect(queryByText('Even Incorrect')).toBeNull()
 })
