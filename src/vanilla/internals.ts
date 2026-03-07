@@ -1,7 +1,7 @@
 // Internal functions (subject to change without notice)
 // In case you rely on them, be sure to pin the version
 
-import type { Atom, WritableAtom } from './atom.ts'
+import { INTERNAL_defaultRead, type Atom, type WritableAtom } from './atom.ts'
 
 type AnyValue = unknown
 type AnyError = unknown
@@ -602,45 +602,49 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     }
   }
   let controller: AbortController | undefined
+  // Skip options object allocation for primitive atoms (defaultRead ignores options)
+  const isPrimitiveRead = atom.read === INTERNAL_defaultRead
   let setSelf: ((...args: unknown[]) => unknown) | undefined
-  const options = {
-    get signal() {
-      if (!controller) {
-        controller = new AbortController()
-      }
-      return controller.signal
-    },
-    get setSelf() {
-      if (import.meta.env?.MODE !== 'production') {
-        // This is shown even before calling. It's a strong warning.
-        console.warn(
-          '[DEPRECATED] setSelf is deprecated and will be removed in v3.',
-        )
-      }
-      if (
-        import.meta.env?.MODE !== 'production' &&
-        !isActuallyWritableAtom(atom)
-      ) {
-        console.warn('setSelf function cannot be used with read-only atom')
-      }
-      if (!setSelf && isActuallyWritableAtom(atom)) {
-        setSelf = (...args) => {
-          if (import.meta.env?.MODE !== 'production' && isSync) {
-            console.warn('setSelf function cannot be called in sync')
+  const options = isPrimitiveRead
+    ? (undefined as never)
+    : {
+        get signal() {
+          if (!controller) {
+            controller = new AbortController()
           }
-          if (!isSync) {
-            try {
-              return writeAtomState(store, atom, ...args)
-            } finally {
-              recomputeInvalidatedAtoms(store)
-              flushCallbacks(store)
+          return controller.signal
+        },
+        get setSelf() {
+          if (import.meta.env?.MODE !== 'production') {
+            // This is shown even before calling. It's a strong warning.
+            console.warn(
+              '[DEPRECATED] setSelf is deprecated and will be removed in v3.',
+            )
+          }
+          if (
+            import.meta.env?.MODE !== 'production' &&
+            !isActuallyWritableAtom(atom)
+          ) {
+            console.warn('setSelf function cannot be used with read-only atom')
+          }
+          if (!setSelf && isActuallyWritableAtom(atom)) {
+            setSelf = (...args) => {
+              if (import.meta.env?.MODE !== 'production' && isSync) {
+                console.warn('setSelf function cannot be called in sync')
+              }
+              if (!isSync) {
+                try {
+                  return writeAtomState(store, atom, ...args)
+                } finally {
+                  recomputeInvalidatedAtoms(store)
+                  flushCallbacks(store)
+                }
+              }
             }
           }
-        }
+          return setSelf
+        },
       }
-      return setSelf
-    },
-  }
   const prevEpochNumber = atomState.n
   try {
     if (import.meta.env?.MODE !== 'production') {

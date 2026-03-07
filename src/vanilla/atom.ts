@@ -128,6 +128,8 @@ function defaultRead<Value>(this: Atom<Value>, get: Getter) {
   return get(this)
 }
 
+export { defaultRead as INTERNAL_defaultRead }
+
 function defaultWrite<Value>(
   this: PrimitiveAtom<Value>,
   get: Getter,
