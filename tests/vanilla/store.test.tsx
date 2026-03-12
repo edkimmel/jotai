@@ -1332,6 +1332,247 @@ it('[DEV-ONLY] should warn store mutation during read', () => {
   )
 })
 
+describe('should propagate changes correctly when dependencies change dynamically', () => {
+  it('propagates when conditional dep switches and new dep was also modified', () => {
+    // Scenario: derived conditionally reads a or b based on a flag.
+    // A write atom sets flag=false AND b=new_value simultaneously.
+    // After the write, derived should reflect b's new value.
+    const store = createStore()
+    const flag = atom(true)
+    const a = atom(1)
+    const b = atom(2)
+    const derived = atom((get) => (get(flag) ? get(a) : get(b)))
+
+    store.sub(derived, vi.fn())
+    expect(store.get(derived)).toBe(1) // reads flag(true), a(1)
+
+    // Write atom that flips the flag AND changes the newly-read dep
+    const action = atom(null, (_get, set) => {
+      set(flag, false)
+      set(b, 20)
+    })
+    store.set(action)
+    expect(store.get(derived)).toBe(20)
+  })
+
+  it('propagates when new dep was modified before the flag', () => {
+    // Same as above but write order is reversed: b changes first, then flag
+    const store = createStore()
+    const flag = atom(true)
+    const a = atom(1)
+    const b = atom(2)
+    const derived = atom((get) => (get(flag) ? get(a) : get(b)))
+
+    store.sub(derived, vi.fn())
+    expect(store.get(derived)).toBe(1)
+
+    const action = atom(null, (_get, set) => {
+      set(b, 20) // change b first (derived doesn't depend on b yet)
+      set(flag, false) // then flip — derived now reads b
+    })
+    store.set(action)
+    expect(store.get(derived)).toBe(20)
+  })
+
+  it('propagates through a chain when intermediate atom switches deps', () => {
+    // derived1 conditionally reads a or b; derived2 reads derived1.
+    // When the dep switches, derived2 should see the updated value.
+    const store = createStore()
+    const flag = atom(true)
+    const a = atom(10)
+    const b = atom(20)
+    const derived1 = atom((get) => (get(flag) ? get(a) : get(b)))
+    const derived2 = atom((get) => get(derived1) * 2)
+
+    const callback = vi.fn()
+    store.sub(derived2, callback)
+    expect(store.get(derived2)).toBe(20) // 10 * 2
+
+    store.set(flag, false)
+    expect(store.get(derived1)).toBe(20)
+    expect(store.get(derived2)).toBe(40) // 20 * 2
+    expect(callback).toHaveBeenCalled()
+  })
+
+  it('propagates when new dep acquired during recomputation also needs recomputation', () => {
+    // derived_a depends on base (mounted separately).
+    // derived_b conditionally depends on derived_a based on a flag.
+    // When flag flips AND base changes in the same write, derived_b
+    // should see the updated derived_a value even though derived_a
+    // was not in derived_b's old dependency set.
+    const store = createStore()
+    const flag = atom(false)
+    const base = atom(1)
+    const derived_a = atom((get) => get(base) * 10)
+    const derived_b = atom((get) => (get(flag) ? get(derived_a) : 0))
+
+    // Subscribe to both so they're mounted
+    store.sub(derived_a, vi.fn())
+    store.sub(derived_b, vi.fn())
+
+    expect(store.get(derived_a)).toBe(10)
+    expect(store.get(derived_b)).toBe(0)
+
+    // Simultaneously flip flag and change base
+    const action = atom(null, (_get, set) => {
+      set(flag, true)
+      set(base, 2)
+    })
+    store.set(action)
+    expect(store.get(derived_a)).toBe(20)
+    expect(store.get(derived_b)).toBe(20)
+  })
+
+  it('handles diamond with conditional edges correctly', () => {
+    // Diamond shape where one edge is conditional:
+    //   base
+    //   /  \
+    //  mid1 mid2 (mid2 conditionally reads base)
+    //   \  /
+    //   top
+    const store = createStore()
+    const base = atom(1)
+    const flag = atom(true)
+    const mid1 = atom((get) => get(base) + 100)
+    const mid2 = atom((get) => (get(flag) ? get(base) + 200 : 0))
+    const top = atom((get) => get(mid1) + get(mid2))
+
+    const callback = vi.fn()
+    store.sub(top, callback)
+    expect(store.get(top)).toBe(302) // (1+100) + (1+200)
+
+    // Disable mid2's dependency on base
+    store.set(flag, false)
+    expect(store.get(mid2)).toBe(0)
+    expect(store.get(top)).toBe(101) // (1+100) + 0
+
+    // Now change base — only mid1 should be affected
+    callback.mockClear()
+    store.set(base, 5)
+    expect(store.get(mid1)).toBe(105)
+    expect(store.get(mid2)).toBe(0) // still 0, doesn't depend on base anymore
+    expect(store.get(top)).toBe(105) // 105 + 0
+
+    // Re-enable mid2's dependency on base
+    store.set(flag, true)
+    expect(store.get(mid2)).toBe(205) // 5 + 200
+    expect(store.get(top)).toBe(310) // 105 + 205
+  })
+
+  it('notifies subscribers when dep switch causes value change', () => {
+    const store = createStore()
+    const selector = atom<'a' | 'b'>('a')
+    const a = atom(1)
+    const b = atom(2)
+    const derived = atom((get) => (get(selector) === 'a' ? get(a) : get(b)))
+
+    const callback = vi.fn()
+    store.sub(derived, callback)
+    expect(store.get(derived)).toBe(1)
+
+    // Switch selector — derived should change from 1 to 2
+    store.set(selector, 'b')
+    expect(store.get(derived)).toBe(2)
+    expect(callback).toHaveBeenCalledTimes(1)
+
+    // Now changing 'a' should NOT trigger derived (no longer dependent)
+    callback.mockClear()
+    store.set(a, 99)
+    expect(store.get(derived)).toBe(2)
+    expect(callback).toHaveBeenCalledTimes(0)
+
+    // But changing 'b' SHOULD trigger derived
+    store.set(b, 42)
+    expect(store.get(derived)).toBe(42)
+    expect(callback).toHaveBeenCalledTimes(1)
+  })
+
+  it('handles three-way conditional dep switching', () => {
+    const store = createStore()
+    const selector = atom<'a' | 'b' | 'c'>('a')
+    const a = atom(10)
+    const b = atom(20)
+    const c = atom(30)
+    const derived = atom((get) => {
+      const s = get(selector)
+      if (s === 'a') return get(a)
+      if (s === 'b') return get(b)
+      return get(c)
+    })
+
+    store.sub(derived, vi.fn())
+    expect(store.get(derived)).toBe(10)
+
+    // Switch to b AND change b simultaneously
+    const action = atom(null, (_get, set) => {
+      set(selector, 'b')
+      set(b, 200)
+    })
+    store.set(action)
+    expect(store.get(derived)).toBe(200)
+
+    // Switch to c AND change c simultaneously
+    const action2 = atom(null, (_get, set) => {
+      set(selector, 'c')
+      set(c, 300)
+    })
+    store.set(action2)
+    expect(store.get(derived)).toBe(300)
+  })
+
+  it('propagates correctly when deps change and topo sort order may differ from new graph', () => {
+    // Create a graph where recomputation order matters:
+    // base1 -> derived_a -> top
+    // base2 -> derived_b (not connected to top initially)
+    // Then switch top to depend on derived_b instead of derived_a,
+    // while also changing base2.
+    const store = createStore()
+    const base1 = atom(1)
+    const base2 = atom(2)
+    const flag = atom(true)
+    const derived_a = atom((get) => get(base1) * 10)
+    const derived_b = atom((get) => get(base2) * 10)
+    const top = atom((get) => (get(flag) ? get(derived_a) : get(derived_b)))
+
+    store.sub(derived_a, vi.fn())
+    store.sub(derived_b, vi.fn())
+    store.sub(top, vi.fn())
+
+    expect(store.get(top)).toBe(10) // base1(1) * 10
+
+    const action = atom(null, (_get, set) => {
+      set(flag, false) // top now reads derived_b
+      set(base2, 5) // change derived_b's dependency
+    })
+    store.set(action)
+    expect(store.get(derived_b)).toBe(50) // base2(5) * 10
+    expect(store.get(top)).toBe(50)
+  })
+
+  it('handles unmounted atoms with dynamic deps via store.get', () => {
+    // For unmounted atoms, readAtomState handles deps recursively.
+    // Verify the epoch cache doesn't serve stale values after dep switch.
+    const store = createStore()
+    const flag = atom(true)
+    const a = atom(1)
+    const b = atom(2)
+    const derived = atom((get) => (get(flag) ? get(a) : get(b)))
+
+    // No subscription — unmounted path
+    expect(store.get(derived)).toBe(1)
+
+    store.set(flag, false)
+    expect(store.get(derived)).toBe(2)
+
+    store.set(b, 42)
+    expect(store.get(derived)).toBe(42)
+
+    // Changing a should not affect derived anymore
+    store.set(a, 99)
+    expect(store.get(derived)).toBe(42)
+  })
+})
+
 it('should keep reactivity when a derived atom returns a function that calls get (#3240)', () => {
   const store = createStore()
   const stableAtom = atom(0)
