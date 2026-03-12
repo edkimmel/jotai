@@ -574,7 +574,9 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     // For unmounted atoms, check if we can skip the dependency walk entirely.
     // If the store epoch hasn't changed since the last verification, no writes
     // have occurred, so dependencies can't have changed.
-    if (!mountedMap.has(atom)) {
+    // Skip this optimization for atoms with promise values - async atoms need
+    // the full dependency walk to re-establish pending promise chains during mount.
+    if (!mountedMap.has(atom) && !isPromiseLike(atomState.v)) {
       const epochState = getStoreEpochState(store)
       if ('v' in atomState || 'e' in atomState) {
         const entry = epochState.verified.get(atom)
