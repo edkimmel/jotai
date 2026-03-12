@@ -30,7 +30,10 @@ type Callback<Param, AtomType> = (event: {
 export interface AtomFamily<Param, AtomType> {
   (param: Param): AtomType
   getParams(): Iterable<Param>
+  debugLabel?: string
+  peek(param: Param): AtomType | undefined;
   remove(param: Param): void
+  
   setShouldRemove(shouldRemove: ShouldRemove<Param> | null): void
   /**
    * fires when an atom is created or removed
@@ -121,7 +124,29 @@ export function atomFamily<Param, AtomType extends Atom<unknown>>(
   }
 
   createAtom.getParams = () => atoms.keys()
-
+  createAtom.peek = (param: Param) => {
+    let item: [AtomType, CreatedAt] | undefined
+    if (areEqual === undefined) {
+      item = atoms.get(param)
+    } else {
+      // Custom comparator, iterate over all elements
+      for (const [key, value] of atoms) {
+        if (areEqual(key, param)) {
+          item = value
+          break
+        }
+      }
+    }
+    if (item !== undefined) {
+      if (shouldRemove?.(item[1], param)) {
+        createAtom.remove(param)
+        return undefined
+      } else {
+        return item[0]
+      }
+    }
+    return undefined
+  }
   createAtom.remove = (param: Param) => {
     if (areEqual === undefined) {
       if (!atoms.has(param)) return
