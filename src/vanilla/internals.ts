@@ -547,6 +547,33 @@ const storeMutationSet = new WeakSet<Store>()
 // eliminating per-read Set/Map allocations.
 let readEpoch = 0
 
+// Extracted from readAtomState to avoid per-call closure allocations.
+function pruneDeps(atomState: AtomState, epoch: number): void {
+  for (const a of atomState.d.keys()) {
+    if ((atomState.g.get(a) as number) < epoch) {
+      atomState.d.delete(a)
+      atomState.g.delete(a)
+    }
+  }
+}
+
+function mountDepsIfAsync(
+  store: Store,
+  atom: AnyAtom,
+  buildingBlocks: Readonly<BuildingBlocks>,
+): void {
+  const mountedMap = buildingBlocks[1]
+  if (mountedMap.has(atom)) {
+    const changedAtoms = buildingBlocks[3]
+    const shouldRecompute = !changedAtoms.size
+    buildingBlocks[17](store, atom) // mountDependencies
+    if (shouldRecompute) {
+      buildingBlocks[13](store) // recomputeInvalidatedAtoms
+      buildingBlocks[12](store) // flushCallbacks
+    }
+  }
+}
+
 const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const buildingBlocks = getInternalBuildingBlocks(store)
   // Extract only what's needed for the cache-check fast paths first.
@@ -610,30 +637,10 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const flushCallbacks = buildingBlocks[12]
   const recomputeInvalidatedAtoms = buildingBlocks[13]
   const writeAtomState = buildingBlocks[16]
-  const mountDependencies = buildingBlocks[17]
   const setAtomStateValueOrPromise = buildingBlocks[20]
   const registerAbortHandler = buildingBlocks[26]
   let isSync = true
   const currentEpoch = ++readEpoch
-  const pruneDependencies = () => {
-    for (const a of atomState.d.keys()) {
-      if ((atomState.g.get(a) as number) < currentEpoch) {
-        atomState.d.delete(a)
-        atomState.g.delete(a)
-      }
-    }
-  }
-  const mountDependenciesIfAsync = () => {
-    if (mountedMap.has(atom)) {
-      // If changedAtoms is already populated, an outer recompute cycle will handle it
-      const shouldRecompute = !changedAtoms.size
-      mountDependencies(store, atom)
-      if (shouldRecompute) {
-        recomputeInvalidatedAtoms(store)
-        flushCallbacks(store)
-      }
-    }
-  }
   const getter = <V>(a: Atom<V>) => {
     if (a === (atom as AnyAtom)) {
       const aState = ensureAtomState(store, a)
@@ -661,7 +668,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
         mountedMap.get(a)?.t.add(atom)
       }
       if (!isSync) {
-        mountDependenciesIfAsync()
+        mountDepsIfAsync(store, atom, buildingBlocks)
       }
     }
   }
@@ -720,12 +727,12 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     if (isPromiseLike(valueOrPromise)) {
       registerAbortHandler(store, valueOrPromise, () => controller?.abort())
       const settle = () => {
-        pruneDependencies()
-        mountDependenciesIfAsync()
+        pruneDeps(atomState, currentEpoch)
+        mountDepsIfAsync(store, atom, buildingBlocks)
       }
       valueOrPromise.then(settle, settle)
     } else {
-      pruneDependencies()
+      pruneDeps(atomState, currentEpoch)
     }
     storeHooks.r?.(atom)
     return atomState
