@@ -26,6 +26,11 @@ type AtomState<Value = AnyValue> = {
    */
   readonly d: Map<AnyAtom, EpochNumber>
   /**
+   * Map tracking the read epoch when each dependency was last accessed.
+   * Used to prune stale dependencies without per-read Set/Map allocations.
+   */
+  readonly g: Map<AnyAtom, number>
+  /**
    * Set of atoms with pending promise that depend on the atom.
    *
    * This may cause memory leaks, but it's for the capability to continue promises
@@ -379,7 +384,7 @@ const BUILDING_BLOCK_ensureAtomState: EnsureAtomState = (store, atom) => {
   }
   let atomState = atomStateMap.get(atom)
   if (!atomState) {
-    atomState = { d: new Map(), p: new Set(), n: 0 }
+    atomState = { d: new Map(), g: new Map(), p: new Set(), n: 0 }
     atomStateMap.set(atom, atomState)
     storeHooks.i?.(atom)
     atomOnInit?.(store, atom)
@@ -473,7 +478,16 @@ const BUILDING_BLOCK_recomputeInvalidatedAtoms: RecomputeInvalidatedAtoms = (
     }
     visiting.add(a)
     // Push unvisited dependents onto the stack
-    for (const d of getMountedOrPendingDependents(a, aState, mountedMap)) {
+    // Inline iteration to avoid Set allocation from getMountedOrPendingDependents
+    const aMounted = mountedMap.get(a)
+    if (aMounted) {
+      for (const d of aMounted.t) {
+        if (!visiting.has(d)) {
+          stack.push(d)
+        }
+      }
+    }
+    for (const d of aState.p) {
       if (!visiting.has(d)) {
         stack.push(d)
       }
@@ -498,32 +512,104 @@ const BUILDING_BLOCK_recomputeInvalidatedAtoms: RecomputeInvalidatedAtoms = (
   }
 }
 
+// Store-level epoch counter for unmounted atom cache optimization.
+// Incremented on each store.set() call so that repeated store.get() calls
+// on unmounted atoms can skip redundant recursive dependency walks when
+// no mutations have occurred between reads.
+// The verified map is keyed per-store (not on AtomState) because
+// AtomState objects can be shared across derived stores.
+// Verified entries store [storeEpoch, atomEpoch] - we check both
+// because another store may mutate the shared AtomState.
+type VerifiedEntry = [storeEpoch: number, atomEpoch: EpochNumber]
+type StoreEpochState = {
+  epoch: number
+  verified: WeakMap<AnyAtom, VerifiedEntry>
+}
+const storeEpochMap = new WeakMap<Store, StoreEpochState>()
+const getStoreEpochState = (store: Store): StoreEpochState => {
+  let state = storeEpochMap.get(store)
+  if (!state) {
+    state = { epoch: 0, verified: new WeakMap() }
+    storeEpochMap.set(store, state)
+  }
+  return state
+}
+const incrementStoreEpoch = (store: Store): void => {
+  const state = getStoreEpochState(store)
+  ++state.epoch
+}
+
 // Dev only
 const storeMutationSet = new WeakSet<Store>()
 
+// Global read epoch counter, incremented each readAtomState call.
+// Used with atomState.g to track which deps were accessed during a read,
+// eliminating per-read Set/Map allocations.
+let readEpoch = 0
+
+// Extracted from readAtomState to avoid per-call closure allocations.
+function pruneDeps(atomState: AtomState, epoch: number): void {
+  for (const a of atomState.d.keys()) {
+    if ((atomState.g.get(a) as number) < epoch) {
+      atomState.d.delete(a)
+      atomState.g.delete(a)
+    }
+  }
+}
+
+function mountDepsIfAsync(
+  store: Store,
+  atom: AnyAtom,
+  buildingBlocks: Readonly<BuildingBlocks>,
+): void {
+  const mountedMap = buildingBlocks[1]
+  if (mountedMap.has(atom)) {
+    const changedAtoms = buildingBlocks[3]
+    const shouldRecompute = !changedAtoms.size
+    buildingBlocks[17](store, atom) // mountDependencies
+    if (shouldRecompute) {
+      buildingBlocks[13](store) // recomputeInvalidatedAtoms
+      buildingBlocks[12](store) // flushCallbacks
+    }
+  }
+}
+
 const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const buildingBlocks = getInternalBuildingBlocks(store)
+  // Extract only what's needed for the cache-check fast paths first.
+  // The remaining building blocks are deferred until after early returns.
   const mountedMap = buildingBlocks[1]
   const invalidatedAtoms = buildingBlocks[2]
-  const changedAtoms = buildingBlocks[3]
-  const storeHooks = buildingBlocks[6]
-  const atomRead = buildingBlocks[7]
   const ensureAtomState = buildingBlocks[11]
-  const flushCallbacks = buildingBlocks[12]
-  const recomputeInvalidatedAtoms = buildingBlocks[13]
   const readAtomState = buildingBlocks[14]
-  const writeAtomState = buildingBlocks[16]
-  const mountDependencies = buildingBlocks[17]
-  const setAtomStateValueOrPromise = buildingBlocks[20]
-  const registerAbortHandler = buildingBlocks[26]
   const atomState = ensureAtomState(store, atom)
+  // Cache the mounted check to avoid repeated WeakMap lookups in the hot path.
+  const isMounted = mountedMap.has(atom)
   // See if we can skip recomputing this atom.
   if (isAtomStateInitialized(atomState)) {
     // If the atom is mounted, we can use cached atom state.
     // because it should have been updated by dependencies.
     // We can't use the cache if the atom is invalidated.
-    if (mountedMap.has(atom) && invalidatedAtoms.get(atom) !== atomState.n) {
+    if (isMounted && invalidatedAtoms.get(atom) !== atomState.n) {
       return atomState
+    }
+    // For unmounted atoms, check if we can skip the dependency walk entirely.
+    // If the store epoch hasn't changed since the last verification, no writes
+    // have occurred, so dependencies can't have changed.
+    // Skip this optimization for atoms with promise values - async atoms need
+    // the full dependency walk to re-establish pending promise chains during mount.
+    if (!isMounted && !isPromiseLike(atomState.v)) {
+      const epochState = getStoreEpochState(store)
+      if ('v' in atomState || 'e' in atomState) {
+        const entry = epochState.verified.get(atom)
+        if (
+          entry &&
+          entry[0] === epochState.epoch &&
+          entry[1] === atomState.n
+        ) {
+          return atomState
+        }
+      }
     }
     // Otherwise, check if the dependencies have changed.
     // If all dependencies haven't changed, we can use the cache.
@@ -535,31 +621,26 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
       }
     }
     if (!hasChangedDeps) {
+      // Cache the verification for unmounted atoms
+      if (!isMounted) {
+        const epochState = getStoreEpochState(store)
+        epochState.verified.set(atom, [epochState.epoch, atomState.n])
+      }
       return atomState
     }
   }
   // Compute a new state for this atom.
+  // Defer extraction of building blocks only needed for recomputation.
+  const changedAtoms = buildingBlocks[3]
+  const storeHooks = buildingBlocks[6]
+  const atomRead = buildingBlocks[7]
+  const flushCallbacks = buildingBlocks[12]
+  const recomputeInvalidatedAtoms = buildingBlocks[13]
+  const writeAtomState = buildingBlocks[16]
+  const setAtomStateValueOrPromise = buildingBlocks[20]
+  const registerAbortHandler = buildingBlocks[26]
   let isSync = true
-  const prevDeps = new Set<AnyAtom>(atomState.d.keys())
-  const nextDeps = new Map<AnyAtom, EpochNumber>()
-  const pruneDependencies = () => {
-    for (const a of prevDeps) {
-      if (!nextDeps.has(a)) {
-        atomState.d.delete(a)
-      }
-    }
-  }
-  const mountDependenciesIfAsync = () => {
-    if (mountedMap.has(atom)) {
-      // If changedAtoms is already populated, an outer recompute cycle will handle it
-      const shouldRecompute = !changedAtoms.size
-      mountDependencies(store, atom)
-      if (shouldRecompute) {
-        recomputeInvalidatedAtoms(store)
-        flushCallbacks(store)
-      }
-    }
-  }
+  const currentEpoch = ++readEpoch
   const getter = <V>(a: Atom<V>) => {
     if (a === (atom as AnyAtom)) {
       const aState = ensureAtomState(store, a)
@@ -578,7 +659,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     try {
       return returnAtomValue(aState)
     } finally {
-      nextDeps.set(a, aState.n)
+      atomState.g.set(a, currentEpoch)
       atomState.d.set(a, aState.n)
       if (isPromiseLike(atomState.v)) {
         addPendingPromiseToDependency(atom, atomState.v, aState)
@@ -587,7 +668,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
         mountedMap.get(a)?.t.add(atom)
       }
       if (!isSync) {
-        mountDependenciesIfAsync()
+        mountDepsIfAsync(store, atom, buildingBlocks)
       }
     }
   }
@@ -646,12 +727,12 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     if (isPromiseLike(valueOrPromise)) {
       registerAbortHandler(store, valueOrPromise, () => controller?.abort())
       const settle = () => {
-        pruneDependencies()
-        mountDependenciesIfAsync()
+        pruneDeps(atomState, currentEpoch)
+        mountDepsIfAsync(store, atom, buildingBlocks)
       }
       valueOrPromise.then(settle, settle)
     } else {
-      pruneDependencies()
+      pruneDeps(atomState, currentEpoch)
     }
     storeHooks.r?.(atom)
     return atomState
@@ -685,7 +766,19 @@ const BUILDING_BLOCK_invalidateDependents: InvalidateDependents = (
   while (stack.length) {
     const a = stack.pop()!
     const aState = ensureAtomState(store, a)
-    for (const d of getMountedOrPendingDependents(a, aState, mountedMap)) {
+    // Inline iteration over mounted dependents and pending-promise dependents
+    // to avoid Set allocation from getMountedOrPendingDependents
+    const mounted = mountedMap.get(a)
+    if (mounted) {
+      for (const d of mounted.t) {
+        const dState = ensureAtomState(store, d)
+        if (invalidatedAtoms.get(d) !== dState.n) {
+          invalidatedAtoms.set(d, dState.n)
+          stack.push(d)
+        }
+      }
+    }
+    for (const d of aState.p) {
       const dState = ensureAtomState(store, d)
       if (invalidatedAtoms.get(d) !== dState.n) {
         invalidatedAtoms.set(d, dState.n)
@@ -924,7 +1017,32 @@ const BUILDING_BLOCK_setAtomStateValueOrPromise: SetAtomStateValueOrPromise = (
 }
 
 const BUILDING_BLOCK_storeGet: StoreGet = (store, atom) => {
-  const readAtomState = getInternalBuildingBlocks(store)[14]
+  const buildingBlocks = getInternalBuildingBlocks(store)
+  const mountedMap = buildingBlocks[1]
+  const readAtomState = buildingBlocks[14]
+  // For unmounted atoms, check if we can skip the read entirely.
+  // If the store epoch hasn't changed since the last verification, and the
+  // atom's own epoch hasn't changed (possible with shared AtomState across
+  // derived stores), we can return the cached value.
+  if (!mountedMap.has(atom)) {
+    const epochState = getStoreEpochState(store)
+    const atomStateMap = buildingBlocks[0]
+    const cachedState = atomStateMap.get(atom)
+    if (cachedState && ('v' in cachedState || 'e' in cachedState)) {
+      const entry = epochState.verified.get(atom)
+      if (
+        entry &&
+        entry[0] === epochState.epoch &&
+        entry[1] === cachedState.n
+      ) {
+        return returnAtomValue(cachedState) as any
+      }
+    }
+    const atomState = readAtomState(store, atom)
+    // Cache the verification result for this atom
+    epochState.verified.set(atom, [epochState.epoch, atomState.n])
+    return returnAtomValue(atomState) as any
+  }
   return returnAtomValue(readAtomState(store, atom)) as any
 }
 
@@ -933,6 +1051,8 @@ const BUILDING_BLOCK_storeSet: StoreSet = (store, atom, ...args) => {
   const flushCallbacks = buildingBlocks[12]
   const recomputeInvalidatedAtoms = buildingBlocks[13]
   const writeAtomState = buildingBlocks[16]
+  // Increment store epoch to invalidate unmounted atom caches
+  incrementStoreEpoch(store)
   try {
     return writeAtomState(store, atom, ...args) as any
   } finally {
@@ -981,16 +1101,20 @@ const BUILDING_BLOCK_abortPromise: AbortPromise = (store, promise) => {
   abortHandlers?.forEach((fn) => fn())
 }
 
-const buildingBlockMap = new WeakMap<Store, Readonly<BuildingBlocks>>()
+// Symbol key for fast property-based building blocks access,
+// replacing the WeakMap lookup on every function call.
+const BB_KEY = Symbol()
 
 const getInternalBuildingBlocks = (store: Store): Readonly<BuildingBlocks> => {
-  const buildingBlocks = buildingBlockMap.get(store)!
+  const buildingBlocks = (store as any)[BB_KEY] as
+    | Readonly<BuildingBlocks>
+    | undefined
   if (import.meta.env?.MODE !== 'production' && !buildingBlocks) {
     throw new Error(
       'Store must be created by buildStore to read its building blocks',
     )
   }
-  return buildingBlocks
+  return buildingBlocks!
 }
 
 function getBuildingBlocks(store: Store): Readonly<BuildingBlocks> {
@@ -1003,58 +1127,63 @@ function getBuildingBlocks(store: Store): Readonly<BuildingBlocks> {
 }
 
 function buildStore(...buildArgs: Partial<BuildingBlocks>): Store {
+  // Forward-declare so store method closures can capture it directly,
+  // eliminating the double-lookup (WeakMap + function call) on every
+  // store.get / store.set / store.sub invocation.
+  let buildingBlocks: Readonly<BuildingBlocks>
+
   const store = {
     get(atom) {
-      const storeGet = getInternalBuildingBlocks(store)[21]
-      return storeGet(store, atom)
+      return buildingBlocks[21]!(store, atom)
     },
     set(atom, ...args) {
-      const storeSet = getInternalBuildingBlocks(store)[22]
-      return storeSet(store, atom, ...args)
+      return buildingBlocks[22]!(store, atom, ...args)
     },
     sub(atom, listener) {
-      const storeSub = getInternalBuildingBlocks(store)[23]
-      return storeSub(store, atom, listener)
+      return buildingBlocks[23]!(store, atom, listener)
     },
   } as Store
 
-  const buildingBlocks = (
-    [
-      // store state
-      new WeakMap(), // atomStateMap
-      new WeakMap(), // mountedMap
-      new WeakMap(), // invalidatedAtoms
-      new Set(), // changedAtoms
-      new Set(), // mountCallbacks
-      new Set(), // unmountCallbacks
-      {}, // storeHooks
-      // atom interceptors
-      BUILDING_BLOCK_atomRead,
-      BUILDING_BLOCK_atomWrite,
-      BUILDING_BLOCK_atomOnInit,
-      BUILDING_BLOCK_atomOnMount,
-      // building-block functions
-      BUILDING_BLOCK_ensureAtomState,
-      BUILDING_BLOCK_flushCallbacks,
-      BUILDING_BLOCK_recomputeInvalidatedAtoms,
-      BUILDING_BLOCK_readAtomState,
-      BUILDING_BLOCK_invalidateDependents,
-      BUILDING_BLOCK_writeAtomState,
-      BUILDING_BLOCK_mountDependencies,
-      BUILDING_BLOCK_mountAtom,
-      BUILDING_BLOCK_unmountAtom,
-      BUILDING_BLOCK_setAtomStateValueOrPromise,
-      BUILDING_BLOCK_storeGet,
-      BUILDING_BLOCK_storeSet,
-      BUILDING_BLOCK_storeSub,
-      undefined,
-      // abortable promise support
-      new WeakMap(), // abortHandlersMap
-      BUILDING_BLOCK_registerAbortHandler,
-      BUILDING_BLOCK_abortPromise,
-    ] satisfies BuildingBlocks
-  ).map((fn, i) => buildArgs[i] || fn) as BuildingBlocks
-  buildingBlockMap.set(store, Object.freeze(buildingBlocks))
+  buildingBlocks = Object.freeze(
+    (
+      [
+        // store state
+        new WeakMap(), // atomStateMap
+        new WeakMap(), // mountedMap
+        new WeakMap(), // invalidatedAtoms
+        new Set(), // changedAtoms
+        new Set(), // mountCallbacks
+        new Set(), // unmountCallbacks
+        {}, // storeHooks
+        // atom interceptors
+        BUILDING_BLOCK_atomRead,
+        BUILDING_BLOCK_atomWrite,
+        BUILDING_BLOCK_atomOnInit,
+        BUILDING_BLOCK_atomOnMount,
+        // building-block functions
+        BUILDING_BLOCK_ensureAtomState,
+        BUILDING_BLOCK_flushCallbacks,
+        BUILDING_BLOCK_recomputeInvalidatedAtoms,
+        BUILDING_BLOCK_readAtomState,
+        BUILDING_BLOCK_invalidateDependents,
+        BUILDING_BLOCK_writeAtomState,
+        BUILDING_BLOCK_mountDependencies,
+        BUILDING_BLOCK_mountAtom,
+        BUILDING_BLOCK_unmountAtom,
+        BUILDING_BLOCK_setAtomStateValueOrPromise,
+        BUILDING_BLOCK_storeGet,
+        BUILDING_BLOCK_storeSet,
+        BUILDING_BLOCK_storeSub,
+        undefined,
+        // abortable promise support
+        new WeakMap(), // abortHandlersMap
+        BUILDING_BLOCK_registerAbortHandler,
+        BUILDING_BLOCK_abortPromise,
+      ] satisfies BuildingBlocks
+    ).map((fn, i) => buildArgs[i] || fn) as BuildingBlocks,
+  )
+  // Store building blocks as a property for fast access (symbol key).
+  ;(store as any)[BB_KEY] = buildingBlocks
   return store
 }
 
