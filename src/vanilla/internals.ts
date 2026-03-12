@@ -563,12 +563,14 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const setAtomStateValueOrPromise = buildingBlocks[20]
   const registerAbortHandler = buildingBlocks[26]
   const atomState = ensureAtomState(store, atom)
+  // Cache the mounted check to avoid repeated WeakMap lookups in the hot path.
+  const isMounted = mountedMap.has(atom)
   // See if we can skip recomputing this atom.
   if (isAtomStateInitialized(atomState)) {
     // If the atom is mounted, we can use cached atom state.
     // because it should have been updated by dependencies.
     // We can't use the cache if the atom is invalidated.
-    if (mountedMap.has(atom) && invalidatedAtoms.get(atom) !== atomState.n) {
+    if (isMounted && invalidatedAtoms.get(atom) !== atomState.n) {
       return atomState
     }
     // For unmounted atoms, check if we can skip the dependency walk entirely.
@@ -576,7 +578,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     // have occurred, so dependencies can't have changed.
     // Skip this optimization for atoms with promise values - async atoms need
     // the full dependency walk to re-establish pending promise chains during mount.
-    if (!mountedMap.has(atom) && !isPromiseLike(atomState.v)) {
+    if (!isMounted && !isPromiseLike(atomState.v)) {
       const epochState = getStoreEpochState(store)
       if ('v' in atomState || 'e' in atomState) {
         const entry = epochState.verified.get(atom)
@@ -600,7 +602,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     }
     if (!hasChangedDeps) {
       // Cache the verification for unmounted atoms
-      if (!mountedMap.has(atom)) {
+      if (!isMounted) {
         const epochState = getStoreEpochState(store)
         epochState.verified.set(atom, [epochState.epoch, atomState.n])
       }
