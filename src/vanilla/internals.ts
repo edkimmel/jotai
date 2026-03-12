@@ -549,19 +549,12 @@ let readEpoch = 0
 
 const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const buildingBlocks = getInternalBuildingBlocks(store)
+  // Extract only what's needed for the cache-check fast paths first.
+  // The remaining building blocks are deferred until after early returns.
   const mountedMap = buildingBlocks[1]
   const invalidatedAtoms = buildingBlocks[2]
-  const changedAtoms = buildingBlocks[3]
-  const storeHooks = buildingBlocks[6]
-  const atomRead = buildingBlocks[7]
   const ensureAtomState = buildingBlocks[11]
-  const flushCallbacks = buildingBlocks[12]
-  const recomputeInvalidatedAtoms = buildingBlocks[13]
   const readAtomState = buildingBlocks[14]
-  const writeAtomState = buildingBlocks[16]
-  const mountDependencies = buildingBlocks[17]
-  const setAtomStateValueOrPromise = buildingBlocks[20]
-  const registerAbortHandler = buildingBlocks[26]
   const atomState = ensureAtomState(store, atom)
   // Cache the mounted check to avoid repeated WeakMap lookups in the hot path.
   const isMounted = mountedMap.has(atom)
@@ -610,6 +603,16 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     }
   }
   // Compute a new state for this atom.
+  // Defer extraction of building blocks only needed for recomputation.
+  const changedAtoms = buildingBlocks[3]
+  const storeHooks = buildingBlocks[6]
+  const atomRead = buildingBlocks[7]
+  const flushCallbacks = buildingBlocks[12]
+  const recomputeInvalidatedAtoms = buildingBlocks[13]
+  const writeAtomState = buildingBlocks[16]
+  const mountDependencies = buildingBlocks[17]
+  const setAtomStateValueOrPromise = buildingBlocks[20]
+  const registerAbortHandler = buildingBlocks[26]
   let isSync = true
   const currentEpoch = ++readEpoch
   const pruneDependencies = () => {
