@@ -1,68 +1,73 @@
-# Benchmark Comparison: `main` vs `performance-optimizations`
+# Benchmark Comparison: main vs performance-optimizations
 
-**Date:** 2026-03-07
+All values in ops/s (higher is better). Speedup = perf-opts / main.
 
 ## simple-read
 
-| Test Case | main (ops/s) | perf-opt (ops/s) | Change | Speedup |
-|-----------|-------------:|-----------------:|-------:|--------:|
-| atoms=100 | 9,152,800 | 37,407,096 | +308.7% | 4.09x |
-| atoms=1,000 | 9,219,016 | 36,796,409 | +299.2% | 3.99x |
-| atoms=10,000 | 9,207,003 | 36,883,556 | +300.6% | 4.01x |
-| atoms=100,000 | 8,761,196 | 36,854,072 | +320.7% | 4.21x |
-| atoms=1,000,000 | 9,252,560 | 36,995,086 | +299.8% | 4.00x |
-
-**Average speedup: ~4.06x faster**
+| Benchmark | main (ops/s) | perf-opts (ops/s) | Speedup |
+|---|---:|---:|---:|
+| atoms=100 | 7.30M | 28.71M | **3.93x** |
+| atoms=1000 | 7.40M | 28.25M | **3.82x** |
+| atoms=10000 | 7.44M | 28.37M | **3.82x** |
+| atoms=100000 | 7.32M | 28.26M | **3.86x** |
+| atoms=1000000 | 7.36M | 28.42M | **3.86x** |
 
 ## simple-write
 
-| Test Case | main (ops/s) | perf-opt (ops/s) | Change | Speedup |
-|-----------|-------------:|-----------------:|-------:|--------:|
-| atoms=100 | 696,015 | 780,525 | +12.1% | 1.12x |
-| atoms=1,000 | 702,592 | 779,318 | +10.9% | 1.11x |
-| atoms=10,000 | 705,954 | 784,363 | +11.1% | 1.11x |
-| atoms=100,000 | 703,348 | 785,624 | +11.7% | 1.12x |
-| atoms=1,000,000 | 705,465 | 782,264 | +10.9% | 1.11x |
-
-**Average speedup: ~1.11x faster**
-
-## derived-read
-
-| Test Case | main (ops/s) | perf-opt (ops/s) | Change | Speedup |
-|-----------|-------------:|-----------------:|-------:|--------:|
-| chain depth=1 | 4,416,831 | 38,363,355 | +768.6% | 8.69x |
-| chain depth=5 | 1,530,522 | 36,789,979 | +2,303.6% | 24.04x |
-| chain depth=10 | 839,548 | 37,948,683 | +4,420.2% | 45.20x |
-| chain depth=50 | 184,067 | 36,777,752 | +19,881.1% | 199.81x |
-| chain depth=100 | 91,974 | 37,849,134 | +41,053.3% | 411.53x |
-| wide deps=10 | 847,096 | 38,042,002 | +4,391.3% | 44.91x |
-| wide deps=50 | 188,409 | 37,784,501 | +19,957.7% | 200.55x |
-| wide deps=100 | 94,734 | 37,728,297 | +39,727.5% | 398.28x |
-| wide deps=500 | 18,515 | 37,840,742 | +204,274.1% | 2,043.74x |
-
-**Massive improvements across the board.** The `performance-optimizations` branch eliminates the O(n) dependency chain traversal cost, making derived atom reads nearly constant-time regardless of chain depth or dependency width.
+| Benchmark | main (ops/s) | perf-opts (ops/s) | Speedup |
+|---|---:|---:|---:|
+| atoms=100 | 487.0K | 532.8K | **1.09x** |
+| atoms=1000 | 480.7K | 528.5K | **1.10x** |
+| atoms=10000 | 485.6K | 533.0K | **1.10x** |
+| atoms=100000 | 484.6K | 529.9K | **1.09x** |
+| atoms=1000000 | 484.2K | 531.6K | **1.10x** |
 
 ## subscribe-write
 
-| Test Case | main (ops/s) | perf-opt (ops/s) | Change | Speedup |
-|-----------|-------------:|-----------------:|-------:|--------:|
-| atoms=100 | 368,980 | 303,638 | -17.7% | 0.82x |
-| atoms=1,000 | 516,059 | 545,255 | +5.7% | 1.06x |
-| atoms=10,000 | 455,455 | 397,838 | -12.6% | 0.87x |
-| atoms=100,000 | 430,498 | 441,793 | +2.6% | 1.03x |
-| atoms=1,000,000 | 467,709 | 484,949 | +3.7% | 1.04x |
+| Benchmark | main (ops/s) | perf-opts (ops/s) | Speedup |
+|---|---:|---:|---:|
+| atoms=100 | 367.4K | 396.8K | **1.08x** |
+| atoms=1000 | 386.3K | 255.9K | **0.66x** |
+| atoms=10000 | 372.8K | 414.5K | **1.11x** |
+| atoms=100000 | 361.2K | 393.9K | **1.09x** |
+| atoms=1000000 | 310.6K | 369.6K | **1.19x** |
 
-**Note:** subscribe-write results have high variance (±87% in some cases), making direct comparison unreliable. The results are roughly comparable between branches.
+## derived-read
 
----
+| Benchmark | main (ops/s) | perf-opts (ops/s) | Speedup |
+|---|---:|---:|---:|
+| cached: chain depth=10 | 694.2K | 26.99M | **38.87x** |
+| cached: chain depth=50 | 158.6K | 27.47M | **173.24x** |
+| cached: chain depth=100 | 80.3K | 28.06M | **349.29x** |
+| read-after-write: chain depth=10 | 30.5K | 65.8K | **2.16x** |
+| read-after-write: chain depth=50 | 3.5K | 14.6K | **4.19x** |
+| read-after-write: chain depth=100 | 1.1K | 7.4K | **6.66x** |
+| diamond: layers=3 (cached) | 546.8K | 28.03M | **51.26x** |
+| diamond: layers=5 (cached) | 142.3K | 27.88M | **195.90x** |
+| diamond: layers=7 (cached) | 30.1K | 27.02M | **897.09x** |
+| diamond: layers=10 (cached) | 3.8K | 28.39M | **7483.12x** |
+| diamond: layers=3 (read-after-write) | 79.2K | 133.7K | **1.69x** |
+| diamond: layers=5 (read-after-write) | 33.4K | 84.1K | **2.51x** |
+| diamond: layers=7 (read-after-write) | 11.4K | 56.3K | **4.93x** |
+| diamond: layers=10 (read-after-write) | 1.7K | 36.9K | **21.27x** |
+| tree depth=4 (read-after-write) | 11.4K | 18.6K | **1.63x** |
+| tree depth=6 (read-after-write) | 2.9K | 4.7K | **1.64x** |
+| tree depth=8 (read-after-write) | 679 | 1.2K | **1.72x** |
+| tree depth=10 (read-after-write) | 176 | 285 | **1.62x** |
+| wide deps=10 (cached) | 548.6K | 25.01M | **45.59x** |
+| wide deps=50 (cached) | 123.8K | 25.96M | **209.67x** |
+| wide deps=100 (cached) | 64.5K | 26.23M | **406.40x** |
+| wide deps=500 (cached) | 12.4K | 24.48M | **1978.30x** |
+| wide deps=10 (read-after-write) | 124.2K | 194.7K | **1.57x** |
+| wide deps=50 (read-after-write) | 50.5K | 85.8K | **1.70x** |
+| wide deps=100 (read-after-write) | 29.4K | 51.1K | **1.74x** |
+| wide deps=500 (read-after-write) | 6.5K | 11.1K | **1.71x** |
+| compute chain depth=10 (cached) | 552.6K | 26.22M | **47.46x** |
+| compute chain depth=50 (cached) | 124.6K | 26.07M | **209.21x** |
+| compute chain depth=100 (cached) | 63.0K | 25.52M | **405.12x** |
+| compute chain depth=10 (read-after-write) | 28.1K | 61.5K | **2.19x** |
+| compute chain depth=50 (read-after-write) | 2.9K | 14.2K | **4.91x** |
+| compute chain depth=100 (read-after-write) | 917 | 7.2K | **7.86x** |
+| multi-read diamond layers=5 | 23.2K | 74.9K | **3.22x** |
+| multi-read diamond layers=8 | 4.2K | 43.7K | **10.48x** |
 
-## Summary
-
-| Benchmark | Average Speedup | Verdict |
-|-----------|:-----------:|---------|
-| simple-read | **4.06x** | Significant improvement |
-| simple-write | **1.11x** | Moderate improvement |
-| derived-read | **8.69x - 2,043x** | Dramatic improvement (scales with depth/width) |
-| subscribe-write | ~1.0x | Roughly equivalent (high variance) |
-
-The `performance-optimizations` branch delivers transformative performance gains for read operations, especially for derived atoms with deep dependency chains or wide dependency graphs. The simple-read benchmark shows a consistent ~4x speedup. Write operations see a modest ~11% improvement. Subscribe-write performance is roughly unchanged.
