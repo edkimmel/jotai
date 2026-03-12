@@ -571,6 +571,22 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     if (mountedMap.has(atom) && invalidatedAtoms.get(atom) !== atomState.n) {
       return atomState
     }
+    // For unmounted atoms, check if we can skip the dependency walk entirely.
+    // If the store epoch hasn't changed since the last verification, no writes
+    // have occurred, so dependencies can't have changed.
+    if (!mountedMap.has(atom)) {
+      const epochState = getStoreEpochState(store)
+      if ('v' in atomState || 'e' in atomState) {
+        const entry = epochState.verified.get(atom)
+        if (
+          entry &&
+          entry[0] === epochState.epoch &&
+          entry[1] === atomState.n
+        ) {
+          return atomState
+        }
+      }
+    }
     // Otherwise, check if the dependencies have changed.
     // If all dependencies haven't changed, we can use the cache.
     let hasChangedDeps = false
@@ -581,6 +597,11 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
       }
     }
     if (!hasChangedDeps) {
+      // Cache the verification for unmounted atoms
+      if (!mountedMap.has(atom)) {
+        const epochState = getStoreEpochState(store)
+        epochState.verified.set(atom, [epochState.epoch, atomState.n])
+      }
       return atomState
     }
   }
