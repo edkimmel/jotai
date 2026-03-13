@@ -501,6 +501,89 @@ const BUILDING_BLOCK_recomputeInvalidatedAtoms: RecomputeInvalidatedAtoms = (
 // Dev only
 const storeMutationSet = new WeakSet<Store>()
 
+/**
+ * ReadAtomContext consolidates all per-readAtomState mutable state and closures
+ * into a single object with a pre-bound `get` method. This reduces allocation
+ * from multiple closures (getter + pruneDependencies + mountDependenciesIfAsync)
+ * plus a shared closure context, down to a single object + one bound function.
+ *
+ * The `get` method is bound once in the constructor and reused for the lifetime
+ * of the context. Since atom read functions may capture the getter in their
+ * return value (e.g., returning a function that calls `get`), contexts cannot
+ * be pooled/recycled.
+ */
+class ReadAtomContext {
+  store!: Store
+  atom!: AnyAtom
+  atomState!: AtomState
+  prevDeps!: Set<AnyAtom>
+  nextDeps!: Map<AnyAtom, EpochNumber>
+  isSync!: boolean
+  mountedMap!: MountedMap
+  changedAtoms!: ChangedAtoms
+  ensureAtomState!: EnsureAtomState
+  readAtomState!: ReadAtomState
+  setAtomStateValueOrPromise!: SetAtomStateValueOrPromise
+  mountDependencies!: MountDependencies
+  recomputeInvalidatedAtoms!: RecomputeInvalidatedAtoms
+  flushCallbacks!: FlushCallbacks
+  // Pre-bound getter function, allocated once per context instance
+  readonly get: Getter
+  constructor() {
+    // Bind once at construction; the bound function persists for the context's lifetime
+    this.get = this._get.bind(this) as Getter
+  }
+  _get<V>(a: Atom<V>): V {
+    if (a === this.atom) {
+      const aState = this.ensureAtomState(this.store, a)
+      if (!isAtomStateInitialized(aState)) {
+        if (hasInitialValue(a)) {
+          this.setAtomStateValueOrPromise(this.store, a, a.init)
+        } else {
+          // NOTE invalid derived atoms can reach here
+          throw new Error('no atom init')
+        }
+      }
+      return returnAtomValue(aState)
+    }
+    // a !== atom
+    const aState = this.readAtomState(this.store, a)
+    try {
+      return returnAtomValue(aState)
+    } finally {
+      this.nextDeps.set(a, aState.n)
+      this.atomState.d.set(a, aState.n)
+      if (isPromiseLike(this.atomState.v)) {
+        addPendingPromiseToDependency(this.atom, this.atomState.v, aState)
+      }
+      if (this.mountedMap.has(this.atom)) {
+        this.mountedMap.get(a)?.t.add(this.atom)
+      }
+      if (!this.isSync) {
+        this.mountDependenciesIfAsync()
+      }
+    }
+  }
+  pruneDependencies(): void {
+    for (const a of this.prevDeps) {
+      if (!this.nextDeps.has(a)) {
+        this.atomState.d.delete(a)
+      }
+    }
+  }
+  mountDependenciesIfAsync(): void {
+    if (this.mountedMap.has(this.atom)) {
+      // If changedAtoms is already populated, an outer recompute cycle will handle it
+      const shouldRecompute = !this.changedAtoms.size
+      this.mountDependencies(this.store, this.atom)
+      if (shouldRecompute) {
+        this.recomputeInvalidatedAtoms(this.store)
+        this.flushCallbacks(this.store)
+      }
+    }
+  }
+}
+
 const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const buildingBlocks = getInternalBuildingBlocks(store)
   const mountedMap = buildingBlocks[1]
@@ -539,58 +622,23 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     }
   }
   // Compute a new state for this atom.
-  let isSync = true
-  const prevDeps = new Set<AnyAtom>(atomState.d.keys())
-  const nextDeps = new Map<AnyAtom, EpochNumber>()
-  const pruneDependencies = () => {
-    for (const a of prevDeps) {
-      if (!nextDeps.has(a)) {
-        atomState.d.delete(a)
-      }
-    }
-  }
-  const mountDependenciesIfAsync = () => {
-    if (mountedMap.has(atom)) {
-      // If changedAtoms is already populated, an outer recompute cycle will handle it
-      const shouldRecompute = !changedAtoms.size
-      mountDependencies(store, atom)
-      if (shouldRecompute) {
-        recomputeInvalidatedAtoms(store)
-        flushCallbacks(store)
-      }
-    }
-  }
-  const getter = <V>(a: Atom<V>) => {
-    if (a === (atom as AnyAtom)) {
-      const aState = ensureAtomState(store, a)
-      if (!isAtomStateInitialized(aState)) {
-        if (hasInitialValue(a)) {
-          setAtomStateValueOrPromise(store, a, a.init)
-        } else {
-          // NOTE invalid derived atoms can reach here
-          throw new Error('no atom init')
-        }
-      }
-      return returnAtomValue(aState)
-    }
-    // a !== atom
-    const aState = readAtomState(store, a)
-    try {
-      return returnAtomValue(aState)
-    } finally {
-      nextDeps.set(a, aState.n)
-      atomState.d.set(a, aState.n)
-      if (isPromiseLike(atomState.v)) {
-        addPendingPromiseToDependency(atom, atomState.v, aState)
-      }
-      if (mountedMap.has(atom)) {
-        mountedMap.get(a)?.t.add(atom)
-      }
-      if (!isSync) {
-        mountDependenciesIfAsync()
-      }
-    }
-  }
+  // ReadAtomContext consolidates getter + pruneDependencies + mountDependenciesIfAsync
+  // into a single object, reducing per-call closure allocations.
+  const ctx = new ReadAtomContext()
+  ctx.store = store
+  ctx.atom = atom
+  ctx.atomState = atomState
+  ctx.prevDeps = new Set<AnyAtom>(atomState.d.keys())
+  ctx.nextDeps = new Map<AnyAtom, EpochNumber>()
+  ctx.isSync = true
+  ctx.mountedMap = mountedMap
+  ctx.changedAtoms = changedAtoms
+  ctx.ensureAtomState = ensureAtomState
+  ctx.readAtomState = readAtomState
+  ctx.setAtomStateValueOrPromise = setAtomStateValueOrPromise
+  ctx.mountDependencies = mountDependencies
+  ctx.recomputeInvalidatedAtoms = recomputeInvalidatedAtoms
+  ctx.flushCallbacks = flushCallbacks
   let controller: AbortController | undefined
   let setSelf: ((...args: unknown[]) => unknown) | undefined
   const options = {
@@ -615,10 +663,10 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
       }
       if (!setSelf && isActuallyWritableAtom(atom)) {
         setSelf = (...args) => {
-          if (import.meta.env?.MODE !== 'production' && isSync) {
+          if (import.meta.env?.MODE !== 'production' && ctx.isSync) {
             console.warn('setSelf function cannot be called in sync')
           }
-          if (!isSync) {
+          if (!ctx.isSync) {
             try {
               return writeAtomState(store, atom, ...args)
             } finally {
@@ -636,7 +684,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     if (import.meta.env?.MODE !== 'production') {
       storeMutationSet.delete(store)
     }
-    const valueOrPromise = atomRead(store, atom, getter, options as never)
+    const valueOrPromise = atomRead(store, atom, ctx.get, options as never)
     if (import.meta.env?.MODE !== 'production' && storeMutationSet.has(store)) {
       console.warn(
         'Detected store mutation during atom read. This is not supported.',
@@ -646,12 +694,12 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     if (isPromiseLike(valueOrPromise)) {
       registerAbortHandler(store, valueOrPromise, () => controller?.abort())
       const settle = () => {
-        pruneDependencies()
-        mountDependenciesIfAsync()
+        ctx.pruneDependencies()
+        ctx.mountDependenciesIfAsync()
       }
       valueOrPromise.then(settle, settle)
     } else {
-      pruneDependencies()
+      ctx.pruneDependencies()
     }
     storeHooks.r?.(atom)
     return atomState
@@ -661,7 +709,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     ++atomState.n
     return atomState
   } finally {
-    isSync = false
+    ctx.isSync = false
     if (
       prevEpochNumber !== atomState.n &&
       invalidatedAtoms.get(atom) === prevEpochNumber
