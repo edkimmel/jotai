@@ -614,8 +614,8 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     // Otherwise, check if the dependencies have changed.
     // If all dependencies haven't changed, we can use the cache.
     let hasChangedDeps = false
-    for (const [a, n] of atomState.d) {
-      if (readAtomState(store, a).n !== n) {
+    for (const a of atomState.d.keys()) {
+      if (readAtomState(store, a).n !== atomState.d.get(a)) {
         hasChangedDeps = true
         break
       }
@@ -861,19 +861,19 @@ const BUILDING_BLOCK_mountDependencies: MountDependencies = (store, atom) => {
   const atomState = ensureAtomState(store, atom)
   const mounted = mountedMap.get(atom)
   if (mounted) {
-    for (const [a, n] of atomState.d) {
-      if (!mounted.d.has(a)) {
+    atomState.d.forEach((n, a) => {
+      if (!mounted!.d.has(a)) {
         const aState = ensureAtomState(store, a)
         const aMounted = mountAtom(store, a)
         aMounted.t.add(atom)
-        mounted.d.add(a)
+        mounted!.d.add(a)
         if (n !== aState.n) {
           changedAtoms.add(a)
           invalidateDependents(store, a)
           storeHooks.c?.(a)
         }
       }
-    }
+    })
     for (const a of mounted.d) {
       if (!atomState.d.has(a)) {
         mounted.d.delete(a)
