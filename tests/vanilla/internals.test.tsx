@@ -38,6 +38,8 @@ describe('internals', () => {
             p: new Set(),
             n: 0,
             v: 0,
+            e: undefined,
+            h: true,
           } as INTERNAL_AtomState
         }),
         set: vi.fn(),

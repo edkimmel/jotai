@@ -39,10 +39,22 @@ type AtomState<Value = AnyValue> = {
   readonly p: Set<AnyAtom>
   /** The epoch number of the atom. */
   n: EpochNumber
-  /** Atom value */
-  v?: Value
-  /** Atom error */
-  e?: AnyError
+  /**
+   * Atom value. undefined when uninitialized or when in error state.
+   * Always present on the object to avoid V8 dictionary-mode transitions.
+   */
+  v: Value | undefined
+  /**
+   * Atom error. undefined when there is no error.
+   * Always present on the object to avoid V8 dictionary-mode transitions.
+   */
+  e: AnyError | undefined
+  /**
+   * Whether the atom has a value set (as opposed to being uninitialized).
+   * Needed because v can legitimately be undefined as an atom value.
+   * Always present on the object to avoid V8 dictionary-mode transitions.
+   */
+  h: boolean
 }
 
 /**
@@ -237,17 +249,17 @@ function isActuallyWritableAtom(atom: AnyAtom): atom is AnyWritableAtom {
 }
 
 function isAtomStateInitialized<Value>(atomState: AtomState<Value>): boolean {
-  return 'v' in atomState || 'e' in atomState
+  return atomState.h || atomState.e !== undefined
 }
 
 function returnAtomValue<Value>(atomState: AtomState<Value>): Value {
-  if ('e' in atomState) {
+  if (atomState.e !== undefined) {
     throw atomState.e
   }
-  if (import.meta.env?.MODE !== 'production' && !('v' in atomState)) {
+  if (import.meta.env?.MODE !== 'production' && !atomState.h) {
     throw new Error('[Bug] atom state is not initialized')
   }
-  return atomState.v!
+  return atomState.v as Value
 }
 
 function isPromiseLike(p: unknown): p is PromiseLike<unknown> {
@@ -384,7 +396,7 @@ const BUILDING_BLOCK_ensureAtomState: EnsureAtomState = (store, atom) => {
   }
   let atomState = atomStateMap.get(atom)
   if (!atomState) {
-    atomState = { d: new Map(), g: new Map(), p: new Set(), n: 0 }
+    atomState = { d: new Map(), g: new Map(), p: new Set(), n: 0, v: undefined, e: undefined, h: false }
     atomStateMap.set(atom, atomState)
     storeHooks.i?.(atom)
     atomOnInit?.(store, atom)
@@ -600,7 +612,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     // the full dependency walk to re-establish pending promise chains during mount.
     if (!isMounted && !isPromiseLike(atomState.v)) {
       const epochState = getStoreEpochState(store)
-      if ('v' in atomState || 'e' in atomState) {
+      if (atomState.h || atomState.e !== undefined) {
         const entry = epochState.verified.get(atom)
         if (
           entry &&
@@ -737,8 +749,9 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     storeHooks.r?.(atom)
     return atomState
   } catch (error) {
-    delete atomState.v
+    atomState.v = undefined
     atomState.e = error
+    atomState.h = false
     ++atomState.n
     return atomState
   } finally {
@@ -995,7 +1008,7 @@ const BUILDING_BLOCK_setAtomStateValueOrPromise: SetAtomStateValueOrPromise = (
   const ensureAtomState = buildingBlocks[11]
   const abortPromise = buildingBlocks[27]
   const atomState = ensureAtomState(store, atom)
-  const hasPrevValue = 'v' in atomState
+  const hasPrevValue = atomState.h
   const prevValue = atomState.v
   if (isPromiseLike(valueOrPromise)) {
     for (const a of atomState.d.keys()) {
@@ -1007,7 +1020,8 @@ const BUILDING_BLOCK_setAtomStateValueOrPromise: SetAtomStateValueOrPromise = (
     }
   }
   atomState.v = valueOrPromise
-  delete atomState.e
+  atomState.e = undefined
+  atomState.h = true
   if (!hasPrevValue || !Object.is(prevValue, atomState.v)) {
     ++atomState.n
     if (isPromiseLike(prevValue)) {
@@ -1028,7 +1042,7 @@ const BUILDING_BLOCK_storeGet: StoreGet = (store, atom) => {
     const epochState = getStoreEpochState(store)
     const atomStateMap = buildingBlocks[0]
     const cachedState = atomStateMap.get(atom)
-    if (cachedState && ('v' in cachedState || 'e' in cachedState)) {
+    if (cachedState && (cachedState.h || cachedState.e !== undefined)) {
       const entry = epochState.verified.get(atom)
       if (
         entry &&
