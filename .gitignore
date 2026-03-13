@@ -38,3 +38,4 @@ examples/**/*/package-lock.json
 examples/**/*/yarn.lock
 examples/**/*/pnpm-lock.yaml
 examples/**/*/bun.lockb
+.claude/worktrees/
