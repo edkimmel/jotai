@@ -1105,7 +1105,17 @@ const BUILDING_BLOCK_abortPromise: AbortPromise = (store, promise) => {
 // replacing the WeakMap lookup on every function call.
 const BB_KEY = Symbol()
 
+// Module-level cache for building blocks. Since all building-block functions
+// are synchronous and single-threaded, we can cache the last looked-up
+// store/buildingBlocks pair to avoid repeated property lookups during
+// recursive calls (e.g., readAtomState walking a deep dependency tree).
+let cachedStore: Store | undefined
+let cachedBuildingBlocks: Readonly<BuildingBlocks> | undefined
+
 const getInternalBuildingBlocks = (store: Store): Readonly<BuildingBlocks> => {
+  if (store === cachedStore) {
+    return cachedBuildingBlocks!
+  }
   const buildingBlocks = (store as any)[BB_KEY] as
     | Readonly<BuildingBlocks>
     | undefined
@@ -1114,6 +1124,8 @@ const getInternalBuildingBlocks = (store: Store): Readonly<BuildingBlocks> => {
       'Store must be created by buildStore to read its building blocks',
     )
   }
+  cachedStore = store
+  cachedBuildingBlocks = buildingBlocks
   return buildingBlocks!
 }
 
