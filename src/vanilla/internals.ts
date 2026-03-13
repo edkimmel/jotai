@@ -598,8 +598,10 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     // have occurred, so dependencies can't have changed.
     // Skip this optimization for atoms with promise values - async atoms need
     // the full dependency walk to re-establish pending promise chains during mount.
+    // Cache epochState to avoid redundant WeakMap lookups below.
+    let epochState: ReturnType<typeof getStoreEpochState> | undefined
     if (!isMounted && !isPromiseLike(atomState.v)) {
-      const epochState = getStoreEpochState(store)
+      epochState = getStoreEpochState(store)
       if ('v' in atomState || 'e' in atomState) {
         const entry = epochState.verified.get(atom)
         if (
@@ -623,7 +625,9 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
     if (!hasChangedDeps) {
       // Cache the verification for unmounted atoms
       if (!isMounted) {
-        const epochState = getStoreEpochState(store)
+        if (!epochState) {
+          epochState = getStoreEpochState(store)
+        }
         epochState.verified.set(atom, [epochState.epoch, atomState.n])
       }
       return atomState
@@ -643,7 +647,8 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const currentEpoch = ++readEpoch
   const getter = <V>(a: Atom<V>) => {
     if (a === (atom as AnyAtom)) {
-      const aState = ensureAtomState(store, a)
+      // Reuse already-ensured atomState instead of another WeakMap lookup
+      const aState = atomState as AtomState<V>
       if (!isAtomStateInitialized(aState)) {
         if (hasInitialValue(a)) {
           setAtomStateValueOrPromise(store, a, a.init)
@@ -664,7 +669,7 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
       if (isPromiseLike(atomState.v)) {
         addPendingPromiseToDependency(atom, atomState.v, aState)
       }
-      if (mountedMap.has(atom)) {
+      if (isMounted) {
         mountedMap.get(a)?.t.add(atom)
       }
       if (!isSync) {
