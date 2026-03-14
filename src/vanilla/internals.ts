@@ -498,6 +498,31 @@ const BUILDING_BLOCK_recomputeInvalidatedAtoms: RecomputeInvalidatedAtoms = (
   }
 }
 
+// Store-level epoch cache for unmounted atoms.
+// A per-store epoch counter is incremented on each store.set() call.
+// When reading unmounted atoms, if the store epoch hasn't changed since the
+// last verification and the atom's own epoch matches, we can skip the full
+// recursive dependency walk entirely — no mutations have occurred.
+// The verified map tracks [storeEpoch, atomEpoch] pairs per atom so that
+// atoms shared across derived stores are validated correctly.
+type VerifiedEntry = [storeEpoch: number, atomEpoch: EpochNumber]
+type StoreEpochState = {
+  epoch: number
+  verified: WeakMap<AnyAtom, VerifiedEntry>
+}
+const storeEpochMap = new WeakMap<Store, StoreEpochState>()
+const getStoreEpochState = (store: Store): StoreEpochState => {
+  let state = storeEpochMap.get(store)
+  if (!state) {
+    state = { epoch: 0, verified: new WeakMap() }
+    storeEpochMap.set(store, state)
+  }
+  return state
+}
+const incrementStoreEpoch = (store: Store): void => {
+  ++getStoreEpochState(store).epoch
+}
+
 // Dev only
 const storeMutationSet = new WeakSet<Store>()
 
@@ -517,13 +542,31 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
   const setAtomStateValueOrPromise = buildingBlocks[20]
   const registerAbortHandler = buildingBlocks[26]
   const atomState = ensureAtomState(store, atom)
+  const isMounted = mountedMap.has(atom)
   // See if we can skip recomputing this atom.
   if (isAtomStateInitialized(atomState)) {
     // If the atom is mounted, we can use cached atom state.
     // because it should have been updated by dependencies.
     // We can't use the cache if the atom is invalidated.
-    if (mountedMap.has(atom) && invalidatedAtoms.get(atom) !== atomState.n) {
+    if (isMounted && invalidatedAtoms.get(atom) !== atomState.n) {
       return atomState
+    }
+    // For unmounted synchronous atoms, check if the store epoch is unchanged.
+    // If no writes have occurred since the last verification, no dependency
+    // can have changed, so we can return the cached state without recursing.
+    // We skip this for promise-valued atoms: async atoms need the full dep
+    // walk to re-establish pending promise chains during mountAtom (which
+    // calls readAtomState before the atom appears in mountedMap).
+    if (!isMounted && !isPromiseLike(atomState.v)) {
+      const epochState = getStoreEpochState(store)
+      const entry = epochState.verified.get(atom)
+      if (
+        entry &&
+        entry[0] === epochState.epoch &&
+        entry[1] === atomState.n
+      ) {
+        return atomState
+      }
     }
     // Otherwise, check if the dependencies have changed.
     // If all dependencies haven't changed, we can use the cache.
@@ -535,6 +578,12 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
       }
     }
     if (!hasChangedDeps) {
+      // Cache the verification result so subsequent reads within the same
+      // store epoch can skip this dep walk.
+      if (!isMounted) {
+        const epochState = getStoreEpochState(store)
+        epochState.verified.set(atom, [epochState.epoch, atomState.n])
+      }
       return atomState
     }
   }
@@ -652,6 +701,13 @@ const BUILDING_BLOCK_readAtomState: ReadAtomState = (store, atom) => {
       valueOrPromise.then(settle, settle)
     } else {
       pruneDependencies()
+      // Warm the epoch cache after a sync computation so the next read can
+      // short-circuit without re-walking deps. Async atoms are excluded —
+      // their cache entry is set when the promise settles.
+      if (!isMounted) {
+        const epochState = getStoreEpochState(store)
+        epochState.verified.set(atom, [epochState.epoch, atomState.n])
+      }
     }
     storeHooks.r?.(atom)
     return atomState
@@ -734,6 +790,12 @@ const BUILDING_BLOCK_writeAtomState: WriteAtomState = (
         setAtomStateValueOrPromise(store, a, v)
         mountDependencies(store, a)
         if (prevEpochNumber !== aState.n) {
+          // A value actually changed — bump the store epoch so that the
+          // epoch cache for unmounted atoms is invalidated. This is placed
+          // here (rather than in storeSet) so that it fires for nested
+          // writes (set(otherAtom) calls inside atom.write) and is not
+          // bypassed by derived stores that replace the storeSet building block.
+          incrementStoreEpoch(store)
           changedAtoms.add(a)
           invalidateDependents(store, a)
           storeHooks.c?.(a)
